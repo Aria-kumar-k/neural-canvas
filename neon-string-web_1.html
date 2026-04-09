@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neural Canvas</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640029074/camera_utils.js" crossorigin="anonymous"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
+#wrap { position:relative; width:100vw; height:100vh; }
+#vid  { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); opacity:0.72; z-index:0; }
+#cv   { position:absolute; inset:0; width:100%; height:100%; z-index:1; }
+
+/* vignette */
+#vig { position:absolute; inset:0; z-index:2; pointer-events:none;
+  background:radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.5) 80%, rgba(0,0,0,0.85) 100%); }
+
+/* toolbar — left side vertical */
+#toolbar {
+  position:absolute; left:18px; top:50%; transform:translateY(-50%);
+  z-index:10; display:none; flex-direction:column; align-items:center; gap:10px;
+}
+.tool-btn {
+  width:48px; height:48px; border-radius:50%;
+  border:1.5px solid rgba(255,255,255,0.18);
+  background:rgba(0,0,0,0.6);
+  display:flex; align-items:center; justify-content:center;
+  cursor:pointer; position:relative; transition:border-color 0.2s;
+  color:rgba(255,255,255,0.55); font-size:20px; user-select:none;
+}
+.tool-btn.active { border-color:#fff; box-shadow:0 0 14px currentColor; }
+.tool-btn .hover-ring {
+  position:absolute; inset:-5px; border-radius:50%;
+  border:1.5px solid transparent; transition:border-color 0.15s;
+  pointer-events:none;
+}
+.tool-btn.hovering .hover-ring { border-color:rgba(255,255,255,0.5); }
+
+/* colour swatches */
+.swatch {
+  width:36px; height:36px; border-radius:50%;
+  border:1.5px solid rgba(255,255,255,0.15);
+  cursor:pointer; position:relative; transition:transform 0.15s;
+}
+.swatch.active  { border:2px solid #fff; transform:scale(1.2); }
+.swatch.hovering { transform:scale(1.15); border-color:rgba(255,255,255,0.5); }
+.swatch .hover-ring {
+  position:absolute; inset:-5px; border-radius:50%;
+  border:1.5px solid transparent; pointer-events:none; transition:border-color 0.15s;
+}
+.swatch.hovering .hover-ring { border-color:rgba(255,255,255,0.45); }
+
+/* brush size */
+#brushSize {
+  width:36px; height:36px; border-radius:50%;
+  background:rgba(0,0,0,0.55); border:1.5px solid rgba(255,255,255,0.15);
+  display:flex; align-items:center; justify-content:center;
+  color:rgba(255,255,255,0.5); font-size:10px; letter-spacing:0.05em;
+  cursor:pointer; user-select:none;
+}
+
+/* status badge */
+#badge {
+  position:absolute; bottom:18px; left:50%; transform:translateX(-50%);
+  z-index:10; background:rgba(0,0,0,0.55); border:1px solid rgba(255,255,255,0.12);
+  color:rgba(255,255,255,0.35); font-size:10px; letter-spacing:0.13em;
+  padding:5px 18px; border-radius:20px; pointer-events:none; display:none;
+  text-transform:uppercase;
+}
+
+/* hand mode indicator */
+#modeTag {
+  position:absolute; top:16px; left:50%; transform:translateX(-50%);
+  z-index:10; font-size:11px; letter-spacing:0.14em; padding:5px 16px;
+  border-radius:16px; pointer-events:none; display:none;
+  transition:background 0.3s, color 0.3s;
+}
+
+/* overlay */
+#overlay {
+  position:absolute; inset:0; z-index:20; background:#000;
+  display:flex; flex-direction:column; align-items:center; justify-content:center; gap:26px;
+  transition:opacity 0.8s;
+}
+#overlay h1 {
+  color:#00FF9C; font-size:clamp(20px,4vw,40px); letter-spacing:0.2em; text-transform:uppercase;
+  text-shadow:0 0 28px #00FF9C, 0 0 55px #00FF9C44;
+}
+#overlay p { color:rgba(0,255,156,0.38); font-size:12px; letter-spacing:0.1em; text-align:center; line-height:2; max-width:380px; }
+#startBtn {
+  padding:11px 42px; background:transparent; border:1px solid #00FF9C; color:#00FF9C;
+  font-family:'Courier New',monospace; font-size:12px; letter-spacing:0.16em; text-transform:uppercase;
+  cursor:pointer; box-shadow:0 0 12px #00FF9C33; transition:all 0.2s;
+}
+#startBtn:hover { background:rgba(0,255,156,0.08); }
+#startBtn:disabled { opacity:0.3; cursor:default; }
+#msg { color:rgba(0,255,156,0.48); font-size:11px; letter-spacing:0.1em; min-height:16px; text-align:center; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="vid" autoplay playsinline muted></video>
+  <canvas id="cv"></canvas>
+  <div id="vig"></div>
+
+  <!-- toolbar -->
+  <div id="toolbar">
+    <!-- pen -->
+    <div class="tool-btn" id="btnPen" title="Pen">
+      <div class="hover-ring"></div>
+      ✏️
+    </div>
+    <!-- eraser -->
+    <div class="tool-btn" id="btnErase" title="Eraser">
+      <div class="hover-ring"></div>
+      🧹
+    </div>
+    <!-- clear all -->
+    <div class="tool-btn" id="btnClear" title="Clear All">
+      <div class="hover-ring"></div>
+      🗑️
+    </div>
+    <div style="width:36px;height:1px;background:rgba(255,255,255,0.1);margin:4px 0;"></div>
+    <!-- colours -->
+    <div class="swatch active" id="sw0" style="background:#00FF9C;" title="Neon Green"><div class="hover-ring"></div></div>
+    <div class="swatch" id="sw1" style="background:#FF00FF;" title="Neon Pink"><div class="hover-ring"></div></div>
+    <div class="swatch" id="sw2" style="background:#00FFFF;" title="Cyan"><div class="hover-ring"></div></div>
+    <div class="swatch" id="sw3" style="background:#FFFFFF;" title="White"><div class="hover-ring"></div></div>
+    <div class="swatch" id="sw4" style="background:#FFE500;" title="Yellow"><div class="hover-ring"></div></div>
+    <div class="swatch" id="sw5" style="background:#FF3030;" title="Red"><div class="hover-ring"></div></div>
+    <div style="width:36px;height:1px;background:rgba(255,255,255,0.1);margin:4px 0;"></div>
+    <!-- brush size cycle -->
+    <div id="brushSize">S</div>
+  </div>
+
+  <div id="badge">NEURAL CANVAS</div>
+  <div id="modeTag"></div>
+
+  <div id="overlay">
+    <h1>Neural Canvas</h1>
+    <p>
+      right index — draw<br>
+      right fist — move strokes<br>
+      left palm — erase<br>
+      hover index over toolbar to select tools
+    </p>
+    <button id="startBtn">Initialise</button>
+    <div id="msg"></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  if (typeof THREE === 'undefined') {
+    document.getElementById('msg').textContent = 'THREE.js failed to load.';
+    return;
+  }
+
+  // ── DOM ──────────────────────────────────────────────────────────────────
+  var startBtn  = document.getElementById('startBtn');
+  var msgEl     = document.getElementById('msg');
+  var overlay   = document.getElementById('overlay');
+  var toolbar   = document.getElementById('toolbar');
+  var badge     = document.getElementById('badge');
+  var modeTag   = document.getElementById('modeTag');
+  var vid       = document.getElementById('vid');
+  var cv        = document.getElementById('cv');
+  var btnPen    = document.getElementById('btnPen');
+  var btnErase  = document.getElementById('btnErase');
+  var btnClear  = document.getElementById('btnClear');
+  var brushEl   = document.getElementById('brushSize');
+
+  // ── THREE RENDERER ───────────────────────────────────────────────────────
+  var renderer = new THREE.WebGLRenderer({ canvas: cv, alpha: true, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x000000, 0);
+  var scene  = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 100);
+  camera.position.z = 2;
+
+  window.addEventListener('resize', function () {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // ── COORD CONVERSION ────────────────────────────────────────────────────
+  function mpToScene(lm) {
+    var aspect = window.innerWidth / window.innerHeight;
+    var tan30  = Math.tan((Math.PI / 180) * 30);
+    return new THREE.Vector3(
+      (0.5 - lm.x) * 2.0 * aspect * tan30,
+      (0.5 - lm.y) * 2.0 * tan30,
+      0
+    );
+  }
+
+  // Scene pos → normalised screen [0,1]
+  function sceneToNorm(v) {
+    var aspect = window.innerWidth / window.innerHeight;
+    var tan30  = Math.tan((Math.PI / 180) * 30);
+    return {
+      x: 0.5 - v.x / (2.0 * aspect * tan30),
+      y: 0.5 - v.y / (2.0 * tan30)
+    };
+  }
+
+  // ── PALETTE ──────────────────────────────────────────────────────────────
+  var COLORS = [
+    { hex: '#00FF9C', three: 0x00FF9C },
+    { hex: '#FF00FF', three: 0xFF00FF },
+    { hex: '#00FFFF', three: 0x00FFFF },
+    { hex: '#FFFFFF', three: 0xFFFFFF },
+    { hex: '#FFE500', three: 0xFFE500 },
+    { hex: '#FF3030', three: 0xFF3030 }
+  ];
+  var BRUSH_SIZES = [
+    { label: 'S', radius: 0.006 },
+    { label: 'M', radius: 0.012 },
+    { label: 'L', radius: 0.022 }
+  ];
+  var curColor     = 0;
+  var curBrush     = 0;
+  var penActive    = false;
+  var eraseActive  = false;
+
+  function setColor(idx) {
+    curColor = idx;
+    document.querySelectorAll('.swatch').forEach(function (s, i) {
+      s.classList.toggle('active', i === idx);
+    });
+  }
+  function cycleBrush() {
+    curBrush = (curBrush + 1) % BRUSH_SIZES.length;
+    brushEl.textContent = BRUSH_SIZES[curBrush].label;
+  }
+  function setPen(on) {
+    penActive = on;
+    btnPen.classList.toggle('active', on);
+    if (on) { eraseActive = false; btnErase.classList.remove('active'); }
+  }
+  function setErase(on) {
+    eraseActive = on;
+    btnErase.classList.toggle('active', on);
+    if (on) { penActive = false; btnPen.classList.remove('active'); }
+  }
+
+  // click fallback for mouse
+  btnPen.addEventListener('click',   function () { setPen(!penActive); });
+  btnErase.addEventListener('click', function () { setErase(!eraseActive); });
+  btnClear.addEventListener('click', clearAll);
+  brushEl.addEventListener('click',  cycleBrush);
+  document.querySelectorAll('.swatch').forEach(function (s, i) {
+    s.addEventListener('click', function () { setColor(i); });
+  });
+
+  // ── STROKES ──────────────────────────────────────────────────────────────
+  // Each stroke: { points:[], color, radius, meshes:[], centroid, grabbed }
+  var strokes = [];
+  var activeStroke = null;
+
+  function additiveMat(color, opacity) {
+    return new THREE.MeshBasicMaterial({
+      color: color, transparent: true, opacity: opacity,
+      blending: THREE.AdditiveBlending, depthWrite: false
+    });
+  }
+
+  function buildStrokeMeshes(stroke) {
+    // remove old meshes
+    stroke.meshes.forEach(function (m) {
+      scene.remove(m); m.geometry.dispose(); m.material.dispose();
+    });
+    stroke.meshes = [];
+    if (stroke.points.length < 2) return;
+
+    var curve  = new THREE.CatmullRomCurve3(stroke.points);
+    var r      = stroke.radius;
+    var col    = stroke.color;
+
+    var geo    = new THREE.TubeGeometry(curve, Math.min(stroke.points.length * 2, 120), r,       5, false);
+    var gGeo   = new THREE.TubeGeometry(curve, Math.min(stroke.points.length * 2, 120), r * 2.8, 5, false);
+    var g2Geo  = new THREE.TubeGeometry(curve, Math.min(stroke.points.length * 2, 120), r * 5.0, 5, false);
+
+    var core  = new THREE.Mesh(geo,   new THREE.MeshBasicMaterial({ color: col }));
+    var glow  = new THREE.Mesh(gGeo,  additiveMat(col, 0.18));
+    var halo  = new THREE.Mesh(g2Geo, additiveMat(col, 0.06));
+
+    scene.add(halo); scene.add(glow); scene.add(core);
+    stroke.meshes.push(halo, glow, core);
+    stroke.centroid = computeCentroid(stroke.points);
+  }
+
+  function computeCentroid(pts) {
+    var cx = 0, cy = 0;
+    pts.forEach(function (p) { cx += p.x; cy += p.y; });
+    return new THREE.Vector3(cx / pts.length, cy / pts.length, 0);
+  }
+
+  function removeStroke(idx) {
+    var s = strokes[idx];
+    s.meshes.forEach(function (m) { scene.remove(m); m.geometry.dispose(); m.material.dispose(); });
+    strokes.splice(idx, 1);
+  }
+
+  function clearAll() {
+    for (var i = strokes.length - 1; i >= 0; i--) removeStroke(i);
+    activeStroke = null;
+  }
+
+  // ── FINGER CURSOR DOT ────────────────────────────────────────────────────
+  var cursorGeo  = new THREE.SphereGeometry(0.014, 10, 10);
+  var cursorMat  = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0 });
+  var cursorMesh = new THREE.Mesh(cursorGeo, cursorMat);
+  var cursorHalo = new THREE.Mesh(
+    new THREE.SphereGeometry(0.014, 10, 10),
+    additiveMat(0xffffff, 0)
+  );
+  cursorHalo.scale.setScalar(3.2);
+  cursorMesh.add(cursorHalo);
+  scene.add(cursorMesh);
+
+  // left palm eraser visual
+  var eraserGeo  = new THREE.CircleGeometry(0.14, 32);
+  var eraserMat  = additiveMat(0xFF3030, 0);
+  var eraserMesh = new THREE.Mesh(eraserGeo, eraserMat);
+  scene.add(eraserMesh);
+
+  // ── TOOLBAR HIT DETECTION ────────────────────────────────────────────────
+  // Returns the toolbar element at normalised screen coords, or null
+  var toolbarHoverTimer = {};
+
+  function getToolbarElAt(nx, ny) {
+    var px = nx * window.innerWidth;
+    var py = ny * window.innerHeight;
+    var elements = document.querySelectorAll('.tool-btn, .swatch, #brushSize');
+    for (var i = 0; i < elements.length; i++) {
+      var el  = elements[i];
+      var r   = el.getBoundingClientRect();
+      var pad = 12;
+      if (px >= r.left - pad && px <= r.right + pad && py >= r.top - pad && py <= r.bottom + pad) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  var lastToolbarEl = null;
+  var toolbarDwell  = 0;    // frames hovering same element
+  var DWELL_FRAMES  = 18;   // ~0.6s at 30fps
+
+  function checkToolbarHover(nx, ny) {
+    var el = getToolbarElAt(nx, ny);
+    // visual hover ring
+    document.querySelectorAll('.tool-btn, .swatch').forEach(function (e) {
+      e.classList.remove('hovering');
+    });
+
+    if (!el) { lastToolbarEl = null; toolbarDwell = 0; return; }
+    if (el.classList.contains('tool-btn') || el.classList.contains('swatch')) {
+      el.classList.add('hovering');
+    }
+
+    if (el === lastToolbarEl) {
+      toolbarDwell++;
+      if (toolbarDwell === DWELL_FRAMES) {
+        // activate
+        if (el === btnPen)   setPen(!penActive);
+        else if (el === btnErase) setErase(!eraseActive);
+        else if (el === btnClear) clearAll();
+        else if (el === brushEl)  cycleBrush();
+        else {
+          var idx = parseInt(el.id.replace('sw',''));
+          if (!isNaN(idx)) setColor(idx);
+        }
+        toolbarDwell = 0;
+      }
+    } else {
+      lastToolbarEl = el;
+      toolbarDwell  = 0;
+    }
+  }
+
+  // ── GESTURE HELPERS ──────────────────────────────────────────────────────
+  // Fist detection: all fingertips close to palm
+  function isFist(lm) {
+    var wrist = lm[0];
+    var tips  = [lm[8], lm[12], lm[16], lm[20]];
+    var count = 0;
+    tips.forEach(function (t) {
+      var dx = t.x - wrist.x, dy = t.y - wrist.y;
+      if (Math.sqrt(dx*dx+dy*dy) < 0.12) count++;
+    });
+    return count >= 3;
+  }
+
+  // Palm centre = average of wrist + knuckles
+  function palmCenter(lm) {
+    var pts = [lm[0], lm[5], lm[9], lm[13], lm[17]];
+    var x=0,y=0;
+    pts.forEach(function(p){x+=p.x;y+=p.y;});
+    return { x: x/pts.length, y: y/pts.length };
+  }
+
+  // Palm size (spread) for eraser radius
+  function palmSpread(lm) {
+    var p0 = lm[0], p17 = lm[17];
+    var dx = p0.x-p17.x, dy = p0.y-p17.y;
+    return Math.sqrt(dx*dx+dy*dy);
+  }
+
+  // ── MOVE STATE ───────────────────────────────────────────────────────────
+  var grabbedStroke = -1;
+  var grabOffset    = new THREE.Vector3();
+  var prevFistPos   = null;
+
+  // ── ERASE STATE ──────────────────────────────────────────────────────────
+  var prevErasePos  = null;
+  var ERASE_R       = 0.18;
+
+  // ── DRAW STATE ───────────────────────────────────────────────────────────
+  var prevDrawPos   = null;
+  var MIN_DRAW_DIST = 0.012;
+
+  // ── MEDIAPIPE CALLBACK ───────────────────────────────────────────────────
+  var liveIndex = null;   // right index tip in scene coords
+  var liveLeftPalm = null;
+
+  function onHandResults(res) {
+    liveIndex    = null;
+    liveLeftPalm = null;
+    var numHands = (res.multiHandLandmarks && res.multiHandLandmarks.length) || 0;
+
+    // hide cursor if no hands
+    if (numHands === 0) {
+      cursorMat.opacity = 0;
+      cursorHalo.material.opacity = 0;
+      eraserMat.opacity = 0;
+      if (activeStroke) { buildStrokeMeshes(activeStroke); activeStroke = null; }
+      prevDrawPos = null; prevErasePos = null; prevFistPos = null; grabbedStroke = -1;
+      setModeTag('', '');
+      return;
+    }
+
+    for (var hi = 0; hi < Math.min(numHands, 2); hi++) {
+      var lm        = res.multiHandLandmarks[hi];
+      var handLabel = res.multiHandedness && res.multiHandedness[hi]
+                      ? res.multiHandedness[hi].label : 'Right';
+      // MediaPipe labels are from camera POV (mirrored), so we swap
+      var isRight = (handLabel === 'Left');   // flipped due to mirror
+      var isLeft  = !isRight;
+
+      var indexTip = mpToScene(lm[8]);
+      var pc       = palmCenter(lm);
+      var palmPos  = mpToScene({ x: pc.x, y: pc.y });
+
+      if (isRight) {
+        liveIndex = indexTip;
+
+        // ── TOOLBAR HOVER (right index) ──────────────────────────────────
+        var norm = sceneToNorm(indexTip);
+        checkToolbarHover(norm.x, norm.y);
+
+        // ── FIST → MOVE ──────────────────────────────────────────────────
+        if (isFist(lm)) {
+          setModeTag('MOVE', 'rgba(255,220,0,0.7)');
+          cursorMat.opacity = 0;
+          cursorHalo.material.opacity = 0;
+
+          if (grabbedStroke < 0) {
+            // try to grab nearest stroke centroid
+            var best = -1, bestD = 0.3;
+            for (var si = 0; si < strokes.length; si++) {
+              var c  = strokes[si].centroid;
+              var d  = palmPos.distanceTo(c);
+              if (d < bestD) { bestD = d; best = si; }
+            }
+            if (best >= 0) { grabbedStroke = best; grabOffset.subVectors(strokes[best].centroid, palmPos); }
+          }
+
+          if (grabbedStroke >= 0 && grabbedStroke < strokes.length) {
+            var delta = palmPos.clone().add(grabOffset).sub(strokes[grabbedStroke].centroid);
+            if (prevFistPos) {
+              var fdx = palmPos.x - prevFistPos.x;
+              var fdy = palmPos.y - prevFistPos.y;
+              strokes[grabbedStroke].points.forEach(function (p) { p.x += fdx; p.y += fdy; });
+              strokes[grabbedStroke].centroid.x += fdx;
+              strokes[grabbedStroke].centroid.y += fdy;
+              buildStrokeMeshes(strokes[grabbedStroke]);
+            }
+          }
+          prevFistPos = palmPos.clone();
+
+        } else {
+          // released fist
+          if (grabbedStroke >= 0) { grabbedStroke = -1; }
+          prevFistPos = null;
+
+          // ── INDEX DRAW ───────────────────────────────────────────────
+          if (penActive && !eraseActive) {
+            // don't draw if hovering toolbar
+            var onTool = getToolbarElAt(sceneToNorm(indexTip).x * window.innerWidth,
+                                        sceneToNorm(indexTip).y * window.innerHeight);
+            if (!onTool) {
+              setModeTag('DRAW', 'rgba(0,255,156,0.7)');
+              cursorMat.color.setHex(COLORS[curColor].three);
+              cursorMat.opacity = 0.9;
+              cursorHalo.material.color.setHex(COLORS[curColor].three);
+              cursorHalo.material.opacity = 0.22;
+              cursorMesh.position.copy(indexTip);
+
+              if (!activeStroke) {
+                activeStroke = {
+                  points: [indexTip.clone()],
+                  color:  COLORS[curColor].three,
+                  radius: BRUSH_SIZES[curBrush].radius,
+                  meshes: [],
+                  centroid: indexTip.clone(),
+                  grabbed: false
+                };
+                strokes.push(activeStroke);
+                prevDrawPos = indexTip.clone();
+              } else {
+                if (!prevDrawPos || indexTip.distanceTo(prevDrawPos) > MIN_DRAW_DIST) {
+                  activeStroke.points.push(indexTip.clone());
+                  prevDrawPos = indexTip.clone();
+                  if (activeStroke.points.length >= 2) buildStrokeMeshes(activeStroke);
+                }
+              }
+            } else {
+              // over toolbar — end any active stroke
+              if (activeStroke) { buildStrokeMeshes(activeStroke); activeStroke = null; prevDrawPos = null; }
+            }
+          } else {
+            // pen not active — show neutral cursor
+            cursorMat.color.setHex(0xffffff);
+            cursorMat.opacity = 0.3;
+            cursorHalo.material.color.setHex(0xffffff);
+            cursorHalo.material.opacity = 0.07;
+            cursorMesh.position.copy(indexTip);
+            if (activeStroke) { buildStrokeMeshes(activeStroke); activeStroke = null; prevDrawPos = null; }
+            if (!isFist(lm)) setModeTag('', '');
+          }
+        }
+      }
+
+      if (isLeft) {
+        liveLeftPalm = palmPos;
+        var spread = palmSpread(lm);
+
+        // ── LEFT PALM ERASE ──────────────────────────────────────────────
+        // Detect open palm: spread above threshold
+        var isOpenPalm = spread > 0.10;
+
+        if (isOpenPalm || eraseActive) {
+          setModeTag('ERASE', 'rgba(255,60,60,0.7)');
+          eraserMesh.position.copy(palmPos);
+          eraserMesh.position.z = 0.01;
+          eraserMat.opacity = 0.12;
+
+          if (prevErasePos) {
+            var eDx = palmPos.x - prevErasePos.x;
+            var eDy = palmPos.y - prevErasePos.y;
+            var eMoved = Math.sqrt(eDx*eDx+eDy*eDy);
+            if (eMoved > 0.01) {
+              // erase strokes within radius
+              for (var si2 = strokes.length - 1; si2 >= 0; si2--) {
+                var sc = strokes[si2].centroid;
+                var ed = palmPos.distanceTo(sc);
+                if (ed < ERASE_R) { removeStroke(si2); if (activeStroke === strokes[si2]) activeStroke = null; }
+              }
+            }
+          }
+          prevErasePos = palmPos.clone();
+        } else {
+          eraserMat.opacity = 0;
+          prevErasePos = null;
+        }
+      }
+    }
+  }
+
+  function setModeTag(text, color) {
+    if (!text) { modeTag.style.display = 'none'; return; }
+    modeTag.style.display = 'block';
+    modeTag.textContent = text;
+    modeTag.style.background = 'rgba(0,0,0,0.55)';
+    modeTag.style.border = '1px solid ' + color;
+    modeTag.style.color  = color;
+  }
+
+  // ── RENDER LOOP ──────────────────────────────────────────────────────────
+  (function loop() {
+    requestAnimationFrame(loop);
+    renderer.render(scene, camera);
+  })();
+
+  // ── START ────────────────────────────────────────────────────────────────
+  startBtn.addEventListener('click', function () {
+    startBtn.disabled = true;
+    msgEl.textContent = 'Requesting camera…';
+
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    }).then(function (stream) {
+      vid.srcObject = stream;
+      return vid.play();
+    }).then(function () {
+      msgEl.textContent = 'Loading hand tracking…';
+      if (typeof Hands === 'undefined') {
+        msgEl.textContent = 'MediaPipe not loaded — check internet.';
+        startBtn.disabled = false; return;
+      }
+
+      var hands = new Hands({
+        locateFile: function (f) {
+          return 'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/' + f;
+        }
+      });
+      hands.setOptions({ maxNumHands:2, modelComplexity:1, minDetectionConfidence:0.75, minTrackingConfidence:0.68 });
+      hands.onResults(onHandResults);
+
+      var cam = new Camera(vid, {
+        onFrame: function () { return hands.send({ image: vid }); },
+        width: 1280, height: 720
+      });
+      cam.start().then(function () {
+        overlay.style.opacity = '0';
+        setTimeout(function () { overlay.style.display = 'none'; }, 900);
+        toolbar.style.display = 'flex';
+        badge.style.display   = 'block';
+        modeTag.style.display = 'none';
+        setPen(true);  // start with pen active
+      });
+    }).catch(function (err) {
+      msgEl.textContent = err.name === 'NotAllowedError'
+        ? 'Camera permission denied — allow and retry.'
+        : 'Error: ' + err.message;
+      startBtn.disabled = false;
+      startBtn.textContent = 'Retry';
+    });
+  });
+
+})();
+</script>
+</body>
+</html>
